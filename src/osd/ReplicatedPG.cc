@@ -5633,7 +5633,6 @@ int ReplicatedPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
 	  result = -ENOENT;
 	  break;
 	}
-	t->touch(soid);
 	t->omap_clear(soid);
 	ctx->delta_stats.num_wr++;
       }
@@ -5654,7 +5653,6 @@ int ReplicatedPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
 	  tracepoint(osd, do_osd_op_pre_omaprmkeys, soid.oid.name.c_str(), soid.snap.val);
 	  break;
 	}
-	t->touch(soid);
 	bufferlist to_rm_bl;
 	try {
 	  decode_str_set_to_bl(bp, &to_rm_bl);
