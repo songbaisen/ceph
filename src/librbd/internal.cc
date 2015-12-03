@@ -12,6 +12,7 @@
 #include "common/ContextCompletion.h"
 #include "common/Throttle.h"
 #include "common/WorkQueue.h"
+#include "common/event_socket.h"
 #include "cls/lock/cls_lock_client.h"
 #include "include/stringify.h"
 
@@ -331,7 +332,7 @@ int invoke_async_request(ImageCtx *ictx, const std::string& request_type,
 
     C_SaferCond ctx;
     ictx->snap_lock.get_read();
-    operation::TrimRequest *req = new operation::TrimRequest(
+    operation::TrimRequest<> *req = new operation::TrimRequest<>(
       *ictx, &ctx, ictx->size, newsize, prog_ctx);
     ictx->snap_lock.put_read();
     req->send();
@@ -731,8 +732,8 @@ int invoke_async_request(ImageCtx *ictx, const std::string& request_type,
       return;
     }
 
-    operation::SnapshotCreateRequest *req =
-      new operation::SnapshotCreateRequest(*ictx, ctx, snap_name);
+    operation::SnapshotCreateRequest<> *req =
+      new operation::SnapshotCreateRequest<>(*ictx, ctx, snap_name);
     req->send();
   }
 
@@ -824,8 +825,8 @@ int invoke_async_request(ImageCtx *ictx, const std::string& request_type,
       }
     }
 
-    operation::SnapshotRemoveRequest *req =
-      new operation::SnapshotRemoveRequest(*ictx, ctx, snap_name, snap_id);
+    operation::SnapshotRemoveRequest<> *req =
+      new operation::SnapshotRemoveRequest<>(*ictx, ctx, snap_name, snap_id);
     req->send();
   }
 
@@ -895,8 +896,8 @@ int invoke_async_request(ImageCtx *ictx, const std::string& request_type,
       return;
     }
 
-    operation::SnapshotRenameRequest *req =
-      new operation::SnapshotRenameRequest(*ictx, ctx, src_snap_id, dst_name);
+    operation::SnapshotRenameRequest<> *req =
+      new operation::SnapshotRenameRequest<>(*ictx, ctx, src_snap_id, dst_name);
     req->send();
   }
 
@@ -968,8 +969,8 @@ int invoke_async_request(ImageCtx *ictx, const std::string& request_type,
       return;
     }
 
-    operation::SnapshotProtectRequest *request =
-      new operation::SnapshotProtectRequest(*ictx, ctx, snap_name);
+    operation::SnapshotProtectRequest<> *request =
+      new operation::SnapshotProtectRequest<>(*ictx, ctx, snap_name);
     request->send();
   }
 
@@ -1043,8 +1044,8 @@ int invoke_async_request(ImageCtx *ictx, const std::string& request_type,
       return;
     }
 
-    operation::SnapshotUnprotectRequest *request =
-      new operation::SnapshotUnprotectRequest(*ictx, ctx, snap_name);
+    operation::SnapshotUnprotectRequest<> *request =
+      new operation::SnapshotUnprotectRequest<>(*ictx, ctx, snap_name);
     request->send();
   }
 
@@ -1634,8 +1635,8 @@ int invoke_async_request(ImageCtx *ictx, const std::string& request_type,
       return;
     }
 
-    operation::RenameRequest *req =
-      new operation::RenameRequest(*ictx, ctx, dstname);
+    operation::RenameRequest<> *req =
+      new operation::RenameRequest<>(*ictx, ctx, dstname);
     req->send();
   }
 
@@ -1991,6 +1992,21 @@ int invoke_async_request(ImageCtx *ictx, const std::string& request_type,
     return ictx->get_flags(ictx->snap_id, flags);
   }
 
+  int set_image_notification(ImageCtx *ictx, int fd, int type)
+  {
+    CephContext *cct = ictx->cct;
+    ldout(cct, 20) << __func__ << " " << ictx << " fd " << fd << " type" << type << dendl;
+
+    int r = ictx_check(ictx);
+    if (r < 0) {
+      return r;
+    }
+
+    if (ictx->event_socket.is_valid())
+      return -EINVAL;
+    return ictx->event_socket.init(fd, type);
+  }
+
   int is_exclusive_lock_owner(ImageCtx *ictx, bool *is_owner)
   {
     RWLock::RLocker l(ictx->owner_lock);
@@ -2181,7 +2197,7 @@ int invoke_async_request(ImageCtx *ictx, const std::string& request_type,
       }
     }
 
-    operation::ResizeRequest *req = new operation::ResizeRequest(
+    operation::ResizeRequest<> *req = new operation::ResizeRequest<>(
       *ictx, ctx, size, prog_ctx);
     req->send();
   }
@@ -2547,9 +2563,9 @@ int invoke_async_request(ImageCtx *ictx, const std::string& request_type,
 
     // TODO need to wait for journal replay to complete (if enabled)
     C_SaferCond cond_ctx;
-    operation::SnapshotRollbackRequest *request =
-      new operation::SnapshotRollbackRequest(*ictx, &cond_ctx, snap_name,
-                                             snap_id, new_size, prog_ctx);
+    operation::SnapshotRollbackRequest<> *request =
+      new operation::SnapshotRollbackRequest<>(*ictx, &cond_ctx, snap_name,
+                                               snap_id, new_size, prog_ctx);
     request->send();
     r = cond_ctx.wait();
     if (r < 0) {
@@ -2882,6 +2898,7 @@ int invoke_async_request(ImageCtx *ictx, const std::string& request_type,
            ictx->aio_work_queue->writes_empty());
 
     ictx->cancel_async_requests();
+    ictx->clear_pending_completions();
     ictx->flush_async_operations();
     ictx->readahead.wait_for_pending();
 
@@ -3044,7 +3061,7 @@ int invoke_async_request(ImageCtx *ictx, const std::string& request_type,
       overlap_objects = Striper::get_num_objects(ictx->layout, overlap);
     }
 
-    operation::FlattenRequest *req = new operation::FlattenRequest(
+    operation::FlattenRequest<> *req = new operation::FlattenRequest<>(
       *ictx, ctx, object_size, overlap_objects, snapc, prog_ctx);
     req->send();
   }
@@ -3097,8 +3114,8 @@ int invoke_async_request(ImageCtx *ictx, const std::string& request_type,
       return;
     }
 
-    operation::RebuildObjectMapRequest *req =
-      new operation::RebuildObjectMapRequest(*ictx, ctx, prog_ctx);
+    operation::RebuildObjectMapRequest<> *req =
+      new operation::RebuildObjectMapRequest<>(*ictx, ctx, prog_ctx);
     req->send();
   }
 
@@ -3417,6 +3434,23 @@ int invoke_async_request(ImageCtx *ictx, const std::string& request_type,
     r = ictx->invalidate_cache();
     ictx->perfcounter->inc(l_librbd_invalidate_cache);
     return r;
+  }
+
+  int poll_io_events(ImageCtx *ictx, AioCompletion **comps, int numcomp)
+  {
+    if (numcomp <= 0)
+      return -EINVAL;
+    CephContext *cct = ictx->cct;
+    ldout(cct, 20) << __func__ << " " << ictx << " numcomp = " << numcomp << dendl;
+    int i = 0;
+    Mutex::Locker l(ictx->completed_reqs_lock);
+    while (i < numcomp) {
+      if (ictx->completed_reqs.empty())
+        break;
+      comps[i++] = ictx->completed_reqs.front();
+      ictx->completed_reqs.pop_front();
+    }
+    return i;
   }
 
   int metadata_get(ImageCtx *ictx, const string &key, string *value)

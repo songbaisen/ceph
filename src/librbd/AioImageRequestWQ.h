@@ -25,11 +25,11 @@ public:
   int discard(uint64_t off, uint64_t len);
 
   void aio_read(AioCompletion *c, uint64_t off, uint64_t len, char *buf,
-                bufferlist *pbl, int op_flags);
+                bufferlist *pbl, int op_flags, bool native_async=true);
   void aio_write(AioCompletion *c, uint64_t off, uint64_t len, const char *buf,
-                 int op_flags);
-  void aio_discard(AioCompletion *c, uint64_t off, uint64_t len);
-  void aio_flush(AioCompletion *c);
+                 int op_flags, bool native_async=true);
+  void aio_discard(AioCompletion *c, uint64_t off, uint64_t len, bool native_async=true);
+  void aio_flush(AioCompletion *c, bool native_async=true);
 
   using ThreadPool::PointerWQ<AioImageRequest>::drain;
   using ThreadPool::PointerWQ<AioImageRequest>::empty;
@@ -71,6 +71,17 @@ private:
     }
   };
 
+  struct C_BlockedWrites : public Context {
+    AioImageRequestWQ *aio_work_queue;
+    C_BlockedWrites(AioImageRequestWQ *_aio_work_queue)
+      : aio_work_queue(_aio_work_queue) {
+    }
+
+    virtual void finish(int r) {
+      aio_work_queue->handle_blocked_writes(r);
+    }
+  };
+
   ImageCtx &m_image_ctx;
   mutable Mutex m_lock;
   Contexts m_write_blocker_contexts;
@@ -86,6 +97,7 @@ private:
   void queue(AioImageRequest *req);
 
   void handle_lock_updated(ImageWatcher::LockUpdateState state);
+  void handle_blocked_writes(int r);
 };
 
 } // namespace librbd

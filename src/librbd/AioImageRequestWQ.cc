@@ -35,7 +35,7 @@ ssize_t AioImageRequestWQ::read(uint64_t off, uint64_t len, char *buf,
 
   C_SaferCond cond;
   AioCompletion *c = aio_create_completion_internal(&cond, rbd_ctx_cb);
-  aio_read(c, off, len, buf, NULL, op_flags);
+  aio_read(c, off, len, buf, NULL, op_flags, false);
   return cond.wait();
 }
 
@@ -54,7 +54,7 @@ ssize_t AioImageRequestWQ::write(uint64_t off, uint64_t len, const char *buf,
 
   C_SaferCond cond;
   AioCompletion *c = aio_create_completion_internal(&cond, rbd_ctx_cb);
-  aio_write(c, off, len, buf, op_flags);
+  aio_write(c, off, len, buf, op_flags, false);
 
   r = cond.wait();
   if (r < 0) {
@@ -77,7 +77,7 @@ int AioImageRequestWQ::discard(uint64_t off, uint64_t len) {
 
   C_SaferCond cond;
   AioCompletion *c = aio_create_completion_internal(&cond, rbd_ctx_cb);
-  aio_discard(c, off, len);
+  aio_discard(c, off, len, false);
 
   r = cond.wait();
   if (r < 0) {
@@ -87,12 +87,15 @@ int AioImageRequestWQ::discard(uint64_t off, uint64_t len) {
 }
 
 void AioImageRequestWQ::aio_read(AioCompletion *c, uint64_t off, uint64_t len,
-                                 char *buf, bufferlist *pbl, int op_flags) {
+                                 char *buf, bufferlist *pbl, int op_flags, bool native_async) {
   c->init_time(&m_image_ctx, librbd::AIO_TYPE_READ);
   CephContext *cct = m_image_ctx.cct;
   ldout(cct, 20) << "aio_read: ictx=" << &m_image_ctx << ", "
                  << "completion=" << c << ", off=" << off << ", "
                  << "len=" << len << ", " << "flags=" << op_flags << dendl;
+
+  if (native_async && m_image_ctx.event_socket.is_valid())
+    c->set_event_notify(true);
 
   RWLock::RLocker owner_locker(m_image_ctx.owner_lock);
   if (m_image_ctx.non_blocking_aio) {
@@ -103,12 +106,15 @@ void AioImageRequestWQ::aio_read(AioCompletion *c, uint64_t off, uint64_t len,
 }
 
 void AioImageRequestWQ::aio_write(AioCompletion *c, uint64_t off, uint64_t len,
-                                  const char *buf, int op_flags) {
+                                  const char *buf, int op_flags, bool native_async) {
   c->init_time(&m_image_ctx, librbd::AIO_TYPE_WRITE);
   CephContext *cct = m_image_ctx.cct;
   ldout(cct, 20) << "aio_write: ictx=" << &m_image_ctx << ", "
                  << "completion=" << c << ", off=" << off << ", "
                  << "len=" << len << ", flags=" << op_flags << dendl;
+
+  if (native_async && m_image_ctx.event_socket.is_valid())
+    c->set_event_notify(true);
 
   RWLock::RLocker owner_locker(m_image_ctx.owner_lock);
   if (m_image_ctx.non_blocking_aio || is_journal_required() ||
@@ -120,12 +126,15 @@ void AioImageRequestWQ::aio_write(AioCompletion *c, uint64_t off, uint64_t len,
 }
 
 void AioImageRequestWQ::aio_discard(AioCompletion *c, uint64_t off,
-                                    uint64_t len) {
+                                    uint64_t len, bool native_async) {
   c->init_time(&m_image_ctx, librbd::AIO_TYPE_DISCARD);
   CephContext *cct = m_image_ctx.cct;
   ldout(cct, 20) << "aio_discard: ictx=" << &m_image_ctx << ", "
                  << "completion=" << c << ", off=" << off << ", len=" << len
                  << dendl;
+
+  if (native_async && m_image_ctx.event_socket.is_valid())
+    c->set_event_notify(true);
 
   RWLock::RLocker owner_locker(m_image_ctx.owner_lock);
   if (m_image_ctx.non_blocking_aio || is_journal_required() ||
@@ -136,11 +145,14 @@ void AioImageRequestWQ::aio_discard(AioCompletion *c, uint64_t off,
   }
 }
 
-void AioImageRequestWQ::aio_flush(AioCompletion *c) {
+void AioImageRequestWQ::aio_flush(AioCompletion *c, bool native_async) {
   c->init_time(&m_image_ctx, librbd::AIO_TYPE_FLUSH);
   CephContext *cct = m_image_ctx.cct;
   ldout(cct, 20) << "aio_flush: ictx=" << &m_image_ctx << ", "
                  << "completion=" << c << dendl;
+
+  if (native_async && m_image_ctx.event_socket.is_valid())
+    c->set_event_notify(true);
 
   RWLock::RLocker owner_locker(m_image_ctx.owner_lock);
   if (m_image_ctx.non_blocking_aio || is_journal_required() ||
@@ -165,12 +177,13 @@ void AioImageRequestWQ::block_writes(Context *on_blocked) {
     ++m_write_blockers;
     ldout(cct, 5) << __func__ << ": " << &m_image_ctx << ", "
                   << "num=" << m_write_blockers << dendl;
-    if (m_in_progress_writes > 0) {
+    if (!m_write_blocker_contexts.empty() || m_in_progress_writes > 0) {
       m_write_blocker_contexts.push_back(on_blocked);
       return;
     }
   }
-  on_blocked->complete(0);
+
+  m_image_ctx.op_work_queue->queue(on_blocked);
 }
 
 void AioImageRequestWQ::unblock_writes() {
@@ -230,7 +243,7 @@ void AioImageRequestWQ::process(AioImageRequest *req) {
     req->send();
   }
 
-  Contexts contexts;
+  bool writes_blocked = false;
   {
     Mutex::Locker locker(m_lock);
     if (req->is_write_op()) {
@@ -238,16 +251,17 @@ void AioImageRequestWQ::process(AioImageRequest *req) {
       --m_queued_writes;
 
       assert(m_in_progress_writes > 0);
-      if (--m_in_progress_writes == 0) {
-        contexts.swap(m_write_blocker_contexts);
+      if (--m_in_progress_writes == 0 && !m_write_blocker_contexts.empty()) {
+        writes_blocked = true;
       }
     }
   }
-  delete req;
 
-  for (Contexts::iterator it = contexts.begin(); it != contexts.end(); ++it) {
-    (*it)->complete(0);
+  if (writes_blocked) {
+    RWLock::RLocker owner_locker(m_image_ctx.owner_lock);
+    m_image_ctx.flush(new C_BlockedWrites(this));
   }
+  delete req;
 }
 
 bool AioImageRequestWQ::is_journal_required() const {
@@ -310,6 +324,18 @@ void AioImageRequestWQ::handle_lock_updated(
   } else if (state == ImageWatcher::LOCK_UPDATE_STATE_NOTIFICATION &&
              !writes_empty()) {
     m_image_ctx.image_watcher->request_lock();
+  }
+}
+
+void AioImageRequestWQ::handle_blocked_writes(int r) {
+  Contexts contexts;
+  {
+    Mutex::Locker locker(m_lock);
+    contexts.swap(m_write_blocker_contexts);
+  }
+
+  for (auto ctx : contexts) {
+    ctx->complete(0);
   }
 }
 
