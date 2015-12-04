@@ -1233,9 +1233,9 @@ ln -sf %{_libdir}/librbd.so.1 /usr/lib64/qemu/librbd.so.1
 
 %post selinux
 # Install the policy
-OLD_POLVER=$(%{_sbindir}/semodule -l | grep -P '^ceph[\t ]' | awk '{print $2}')
+OLD_POLVER=$(%{_sbindir}/semodule -l | grep -E '^ceph\W' | awk '{print $2}')
 %{_sbindir}/semodule -n -i %{_datadir}/selinux/packages/ceph.pp
-NEW_POLVER=$(%{_sbindir}/semodule -l | grep -P '^ceph[\t ]' | awk '{print $2}')
+NEW_POLVER=$(%{_sbindir}/semodule -l | grep -E '^ceph\W' | awk '{print $2}')
 
 # Load the policy if SELinux is enabled
 if %{_sbindir}/selinuxenabled; then
