@@ -178,7 +178,6 @@ public:
 
 void ReplicatedPG::on_local_recover(
   const hobject_t &hoid,
-  const object_stat_sum_t &stat_diff,
   const ObjectRecoveryInfo &_recovery_info,
   ObjectContextRef obc,
   ObjectStore::Transaction *t
@@ -227,8 +226,6 @@ void ReplicatedPG::on_local_recover(
   recover_got(recovery_info.soid, recovery_info.version);
 
   if (is_primary()) {
-    info.stats.stats.sum.add(stat_diff);
-
     assert(obc);
     obc->obs.exists = true;
     obc->ondisk_write_lock();
@@ -276,8 +273,10 @@ void ReplicatedPG::on_local_recover(
 }
 
 void ReplicatedPG::on_global_recover(
-  const hobject_t &soid)
+  const hobject_t &soid,
+  const object_stat_sum_t &stat_diff)
 {
+  info.stats.stats.sum.add(stat_diff);
   missing_loc.recovered(soid);
   publish_stats_to_osd();
   dout(10) << "pushed " << soid << " to all replicas" << dendl;
@@ -815,37 +814,39 @@ int ReplicatedPG::do_command(cmdmap_t cmdmap, ostream& ss,
     }
     f->dump_int("num_missing", missing.num_missing());
     f->dump_int("num_unfound", get_num_unfound());
-    map<hobject_t,pg_missing_t::item, hobject_t::ComparatorWithDefault>::const_iterator p = missing.missing.upper_bound(offset);
+    const map<hobject_t, pg_missing_t::item, hobject_t::BitwiseComparator> &needs_recovery_map =
+      missing_loc.get_needs_recovery();
+    map<hobject_t, pg_missing_t::item, hobject_t::BitwiseComparator>::const_iterator p =
+      needs_recovery_map.upper_bound(offset);
     {
       f->open_array_section("objects");
       int32_t num = 0;
       bufferlist bl;
-      while (p != missing.missing.end() && num < cct->_conf->osd_command_max_records) {
-	f->open_object_section("object");
-	{
-	  f->open_object_section("oid");
-	  p->first.dump(f.get());
-	  f->close_section();
-	}
-	p->second.dump(f.get());  // have, need keys
-	{
-	  f->open_array_section("locations");
-	  if (missing_loc.needs_recovery(p->first)) {
-	    for (set<pg_shard_t>::iterator r =
-		   missing_loc.get_locations(p->first).begin();
-		 r != missing_loc.get_locations(p->first).end();
-		 ++r)
-	      f->dump_stream("shard") << *r;
+      for (; p != needs_recovery_map.end() && num < cct->_conf->osd_command_max_records; ++p) {
+        if (missing_loc.is_unfound(p->first)) {
+	  f->open_object_section("object");
+	  {
+	    f->open_object_section("oid");
+	    p->first.dump(f.get());
+	    f->close_section();
+	  }
+          p->second.dump(f.get()); // have, need keys
+	  {
+	    f->open_array_section("locations");
+            for (set<pg_shard_t>::iterator r =
+                missing_loc.get_locations(p->first).begin();
+                r != missing_loc.get_locations(p->first).end();
+                ++r)
+              f->dump_stream("shard") << *r;
+	    f->close_section();
 	  }
 	  f->close_section();
-	}
-	f->close_section();
-	++p;
-	num++;
+	  num++;
+        }
       }
       f->close_section();
     }
-    f->dump_int("more", p != missing.missing.end());
+    f->dump_int("more", p != needs_recovery_map.end());
     f->close_section();
     f->flush(odata);
     return 0;
@@ -2264,33 +2265,29 @@ bool ReplicatedPG::maybe_promote(ObjectContextRef obc,
     }
     break;
   default:
-    if (in_hit_set) {
-      promote_object(obc, missing_oid, oloc, promote_op);
-    } else {
-      // Check if in other hit sets
-      map<time_t,HitSetRef>::iterator itor;
-      bool in_other_hit_sets = false;
-      unsigned max_in_memory_read = pool.info.min_read_recency_for_promote > 0 ? pool.info.min_read_recency_for_promote - 1 : 0;
-      unsigned max_in_memory_write = pool.info.min_write_recency_for_promote > 0 ? pool.info.min_write_recency_for_promote - 1 : 0;
-      unsigned max_in_memory = MAX(max_in_memory_read, max_in_memory_write);
-      for (itor = agent_state->hit_set_map.begin(); itor != agent_state->hit_set_map.end() && max_in_memory--; ++itor) {
-        if (obc.get()) {
-          if (obc->obs.oi.soid != hobject_t() && itor->second->contains(obc->obs.oi.soid)) {
-            in_other_hit_sets = true;
-            break;
-          }
-        } else {
-          if (missing_oid != hobject_t() && itor->second->contains(missing_oid)) {
-            in_other_hit_sets = true;
-            break;
-          }
-        }
+    {
+      unsigned count = (int)in_hit_set;
+      if (count) {
+	// Check if in other hit sets
+	const hobject_t& oid = obc.get() ? obc->obs.oi.soid : missing_oid;
+	for (map<time_t,HitSetRef>::reverse_iterator itor =
+	       agent_state->hit_set_map.rbegin();
+	     itor != agent_state->hit_set_map.rend();
+	     ++itor) {
+	  if (!itor->second->contains(oid)) {
+	    break;
+	  }
+	  ++count;
+	  if (count >= recency) {
+	    break;
+	  }
+	}
       }
-      if (in_other_hit_sets) {
-        promote_object(obc, missing_oid, oloc, promote_op);
+      if (count >= recency) {
+	promote_object(obc, missing_oid, oloc, promote_op);
       } else {
 	// not promoting
-        return false;
+	return false;
       }
     }
     break;
