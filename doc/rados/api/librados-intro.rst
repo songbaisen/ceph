@@ -268,8 +268,9 @@ it and connecting to the cluster might look something like this:
 	#include <stdio.h>
 	#include <string.h>
 	#include <rados/librados.h>
-
-	int main (int argc, char argv**) 
+        #include <stdlib.h>
+         
+	int main (int argc, char **argv) 
 	{
 
 		/* Declare the cluster handle and required arguments. */
