@@ -39,6 +39,8 @@ class QuorumService
   };
 
 public:
+  QuorumService(const QuorumService &other) = delete;
+  QuorumService & operator = (const QuorumService &other) = delete;
   enum {
     SERVICE_HEALTH                   = 0x01,
     SERVICE_TIMECHECK                = 0x02,
