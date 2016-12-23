@@ -134,6 +134,9 @@ BuildRequires:	xfsprogs
 BuildRequires:	xfsprogs-devel
 BuildRequires:	xmlstarlet
 BuildRequires:	yasm
+BuildRequires:  python-psutil
+BuildRequires:  python-prettytable 
+             
 
 #################################################################################
 # distro-conditional dependencies
