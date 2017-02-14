@@ -962,6 +962,7 @@ bool OSDService::should_share_map(entity_name_t name, Connection *con,
                << " versus osdmap epoch " << osdmap->get_epoch() << dendl;
       if (*sent_epoch_p < osdmap->get_epoch()) {
         should_send = true;
+        return should_send;
       } // else we don't need to send it out again
     }
   }
